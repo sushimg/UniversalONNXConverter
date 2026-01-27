@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+venv/
+env/
+.env
+
+*.weights
+*.onnx
+*.cfg
+*.pt
+
+core/__pycache__/
+exporters/__pycache__/
+validators/__pycache__/
