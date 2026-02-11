@@ -18,13 +18,13 @@ python main.py --mode darknet --cfg model.cfg --weights model.weights --output m
 python main.py --mode pytorch --weights model.pt --output model.onnx --shape 1 3 640 640 --validate
 
 3. Darknet to PyTorch
-python main.py --mode darknet --cfg model.cfg --weights model.weights --output-mode pt --output model.pt
+python main.py --mode darknet --cfg model.cfg --weights model.weights --output-mode pytorch --output model.pt
 
 Notes:
 - Use --validate to ensure the ONNX model matches the original.
 - Use --no-simplify to disable ONNX model simplification.
 - Use --no-yolo-layer to disable YOLO layers (raw outputs).
-- Use --output-mode pt to save the model as a PyTorch file.
+- Use --output-mode pytorch to save the model as a PyTorch file.
 - Default export mode is ONNX if not specified.
 - Default shape is 1x3x416x416 if not specified.
 - If exporting without weights, skip the --weights flag; weights will be generated randomly.

@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import os
+import warnings
 from .logger import log_info, log_warning, log_success, log_error
 
 class Mish(nn.Module):
@@ -39,41 +40,56 @@ class MaxPoolDark(nn.Module):
         return x
 
 class YOLOLayer(nn.Module):
+    warned = False
+
     def __init__(self, anchors, mask, classes, img_size, no_yolo_layer=False):
         super(YOLOLayer, self).__init__()
-        self.anchors = [anchors[i] for i in mask]
+        self.anchors = torch.FloatTensor([anchors[i] for i in mask])
         self.classes = classes
-        self.img_size = img_size
+        self.img_size = img_size  # (height, width)
         self.no_yolo_layer = no_yolo_layer
         self.num_anchors = len(mask)
+        self.register_buffer('anchor_grid', self.anchors.clone().view(1, self.num_anchors, 1, 1, 2))
+        self.grid = None
+
+    def _make_grid(self, nx=20, ny=20):
+        yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)], indexing='ij')
+        return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
 
     def forward(self, x):
         if self.no_yolo_layer:
             return x
 
-        B, C, H, W = x.shape
-        x = x.view(B, self.num_anchors, 5 + self.classes, H, W).permute(0, 1, 3, 4, 2).contiguous()
+        if not YOLOLayer.warned:
+            log_warning("This model is optimized for static shapes only. Dynamic input sizes are not supported and may lead to unexpected results.")
+            YOLOLayer.warned = True
 
-        x[..., 0:2] = torch.sigmoid(x[..., 0:2])
-        x[..., 4:] = torch.sigmoid(x[..., 4:])
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=torch.jit.TracerWarning)
 
-        grid_y, grid_x = torch.meshgrid([torch.arange(H, device=x.device), torch.arange(W, device=x.device)], indexing='ij')
-        grid_x = grid_x.view(1, 1, H, W).float()
-        grid_y = grid_y.view(1, 1, H, W).float()
+            B, C, H, W = x.shape
+            x = x.view(B, self.num_anchors, 5 + self.classes, H, W).permute(0, 1, 3, 4, 2).contiguous()
 
-        anchor_w = torch.FloatTensor(self.anchors).view(1, self.num_anchors, 1, 1, 2)[..., 0].to(x.device)
-        anchor_h = torch.FloatTensor(self.anchors).view(1, self.num_anchors, 1, 1, 2)[..., 1].to(x.device)
+            # Split to avoid Gather/ScatterND
+            xy, wh, conf_cls = torch.split(x, [2, 2, self.classes + 1], dim=-1)
 
-        stride_x = self.img_size[1] / W
-        stride_y = self.img_size[0] / H
+            # Activation functions
+            xy = torch.sigmoid(xy)
+            conf_cls = torch.sigmoid(conf_cls)
 
-        pred = x.clone()
-        pred[..., 0] = (x[..., 0] + grid_x) * stride_x
-        pred[..., 1] = (x[..., 1] + grid_y) * stride_y
-        pred[..., 2] = torch.exp(x[..., 2]) * anchor_w
-        pred[..., 3] = torch.exp(x[..., 3]) * anchor_h
+            if self.grid is None or self.grid.shape[2:4] != (H, W):
+                self.grid = self._make_grid(W, H).to(x.device)
 
-        return pred.view(B, -1, 5 + self.classes)
+            # Decoding arithmetic
+            stride_x = self.img_size[1] / W
+            stride_y = self.img_size[0] / H
+            
+            stride = torch.tensor([stride_x, stride_y], device=x.device, dtype=x.dtype)
+            xy = (xy + self.grid) * stride
+            wh = torch.exp(wh) * self.anchor_grid
+
+            pred = torch.cat((xy, wh, conf_cls), dim=-1)
+            return pred.view(B, -1, 5 + self.classes)
 
 class DarknetParser(nn.Module):
     def __init__(self, cfgfile, no_yolo_layer=False):

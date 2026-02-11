@@ -34,10 +34,10 @@ def get_args():
     group.add_argument('--weights', type=str, help='Path to weight file (.weights or .pt)')
     group.add_argument('--cfg', type=str, help='Path to .cfg file (Darknet mode only)')
     group.add_argument('--output', type=str, default='model.onnx', help='Output path (default: model.onnx)')
-    group.add_argument('--output-mode', type=str, default='onnx', choices=['onnx', 'pt'],
+    group.add_argument('--output-mode', type=str, default='onnx', choices=['onnx', 'pytorch'],
                         help='Output format:\n'
                              '  onnx: NPU optimized Opset 11\n'
-                             '  pt  : Standard PyTorch file')
+                             '  pytorch: Standard PyTorch file')
     group.add_argument('--shape', type=int, nargs=4, default=None, 
                         help='Input shape: B C H W (default: 1 3 416 416)')
     
@@ -91,15 +91,29 @@ def load_model(args):
                     model = loaded
             else:
                 model = loaded
-            
-            if hasattr(model, 'fuse'):
-                try: model.fuse()
-                except: pass
-                
-            log_success("PyTorch model is ready.")
+        except ModuleNotFoundError as e:
+            if 'models' in str(e) or 'utils' in str(e):
+                log_info("YOLOv5 model detected but local 'models' module missing.")
+                log_info("Attempting to load via torch.hub (this may download dependencies)...")
+                try:
+                    model = torch.hub.load('ultralytics/yolov5', 'custom', path=args.weights, force_reload=False, trust_repo=True)
+                    log_success("Model successfully loaded using torch.hub.")
+                except Exception as hub_e:
+                    log_error(f"Failed to load via torch.hub: {hub_e}")
+                    log_error("Please ensure you are running the command in the official YOLOv5 directory.")
+                    sys.exit(1)
+            else:
+                log_error(f"Module not found while loading model: {e}")
+                sys.exit(1)
         except Exception as e:
             log_error(f"Could not load PyTorch model: {e}")
             sys.exit(1)
+
+        if model is not None and hasattr(model, 'fuse'):
+            try: model.fuse()
+            except: pass
+            
+        log_success("PyTorch model is ready.")
 
     if hasattr(model, 'eval'):
         model.eval()
@@ -116,6 +130,10 @@ def main():
     if not args.mode:
         log_error("Please specify --mode or use --tutorial.")
         return
+
+    if args.no_yolo_layer and args.mode != 'darknet':
+        log_warning("--no-yolo-layer is only applicable in darknet mode. Ignoring this flag.")
+        args.no_yolo_layer = False
 
     model = load_model(args)
 
@@ -136,7 +154,7 @@ def main():
         else:
             log_info(f"Using input shape: {args.shape}")
 
-    if args.output_mode == 'pt':
+    if args.output_mode == 'pytorch':
         log_info("Saving model to PyTorch format...")
         save_path = args.output
         if not save_path.lower().endswith('.pt'):
@@ -170,11 +188,11 @@ def main():
                 is_valid = validate_conversion(model, final_path, args.shape)
                 
                 if args.mode == 'darknet' and not args.no_yolo_layer:
-                    log_warning("YOLO decoding detected. Phase 2 (OpenCV) may fail due to ScatterND/Gather elements.")
-                    log_warning("If Phase 2 fails, consider using --no-yolo-layer for NPU-friendly export.")
+                    log_warning("YOLO decoding detected. Phase 2 (OpenCV) may fail.")
+                    log_warning("If Phase 2 fails, consider using --no-yolo-layer for a cleaner export.")
 
                 log_info(f"Phase 2: Testing inference with OpenCV DNN ({yolo_status})...")
-                inference_ok = validate_with_opencv(final_path, args.shape)
+                inference_ok = validate_with_opencv(final_path, args.shape, source_mode=args.mode)
                 
                 if is_valid and inference_ok:
                     log_success("All validation phases passed.")
